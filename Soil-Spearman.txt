@@ -1,0 +1,116 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.feature_selection import mutual_info_regression
+
+# Set styles for article-friendly plots
+sns.set_style("white")
+sns.set_context("paper")
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['DejaVu Serif']
+
+# -------------------------
+# Load data
+# -------------------------
+npz = np.load("/content/URM_TEH_NEY_MARV_LENJ.npz", allow_pickle=True)
+data = npz["data"]
+coords = npz["coords"]
+
+# -------------------------
+# Select features
+# -------------------------
+selected_indices = [
+    14,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38
+]
+
+feature_names = [
+    "avg_displacement_mm",
+"bdod_mean_1530",
+"cec_mean_1530",
+"cfvo_mean_1530",
+"clay_mean_1530",
+"phh2o_mean_1530",
+"sand_mean_1530",
+"silt_mean_1530",
+"soc_mean_1530",
+"bdod_mean_60100",
+"cec_mean_60100",
+"cfvo_mean_60100",
+"clay_mean_60100",
+"phh2o_mean_60100",
+"sand_mean_60100",
+"silt_mean_60100",
+"soc_mean_60100",
+]
+
+# -------------------------
+# Build dataset (X_t → y_{t+1})
+# -------------------------
+X_list = []
+y_list = []
+
+T, G, F = data.shape
+
+for t in range(T - 1):
+    X_t = data[t][:, selected_indices]
+    y_next = data[t + 1][:, 14]  # Next time-step displacement
+    X_list.append(X_t)
+    y_list.append(y_next)
+
+X_flat = np.vstack(X_list)
+y_flat = np.hstack(y_list)
+
+df = pd.DataFrame(X_flat, columns=feature_names)
+df["target_next_displacement"] = y_flat
+df = df.replace([np.inf, -np.inf], np.nan).dropna()
+
+# -------------------------
+# Correlation Matrices
+# -------------------------
+corr_spearman = df[feature_names + ["target_next_displacement"]].corr(method="spearman")
+
+# -------------------------
+# Mutual Information Feature Importance
+# -------------------------
+X = df[feature_names].values
+y = df["target_next_displacement"].values
+
+mi = mutual_info_regression(X, y, random_state=42)
+
+# Sort features by MI ascending for higher values at top (higher to lower from top to bottom)
+sorted_idx = np.argsort(mi)
+feature_names_sorted = [feature_names[i] for i in sorted_idx]
+mi_sorted = mi[sorted_idx]
+
+# -------------------------
+# Spearman Correlation Plot
+# -------------------------
+fig1, ax1 = plt.subplots(figsize=(12, 10))
+mask = np.triu(np.ones_like(corr_spearman, dtype=bool), k=1)
+sns.heatmap(corr_spearman, ax=ax1, mask=mask, cmap="YlOrBr", annot=True, fmt=".2f",
+            annot_kws={"size": 10}, square=True)
+ax1.set_title("Spearman Correlation Matrix (Lower Triangle)", fontsize=16)
+ax1.tick_params(axis='both', labelsize=10)
+plt.tight_layout()
+plt.savefig("spearman_correlation_700dpi.png", dpi=700)
+plt.show()
+
+# -------------------------
+# Mutual Information Plot
+# -------------------------
+fig2, ax2 = plt.subplots(figsize=(12, 10))
+bars = ax2.barh(feature_names_sorted, mi_sorted, color=plt.cm.YlOrBr(np.linspace(0, 1, len(mi_sorted))))
+ax2.set_xlabel("Mutual Information", fontsize=12)
+ax2.set_ylabel("Features", fontsize=10)
+ax2.set_title("Mutual Information Feature Importance", fontsize=16)
+ax2.grid(True, alpha=0.3)
+ax2.tick_params(axis='both', labelsize=13)
+
+# Add value labels
+for i, v in enumerate(mi_sorted):
+    ax2.text(v, i, f" {v:.2f}", va='center', ha='left')
+
+plt.tight_layout()
+plt.savefig("mutual_info_700dpi.png", dpi=700)
+plt.show()

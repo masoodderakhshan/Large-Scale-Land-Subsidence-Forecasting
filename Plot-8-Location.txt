@@ -1,0 +1,66 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib import rcParams
+
+# Set font globally for article-quality
+rcParams['font.family'] = 'DejaVu Serif'
+
+# File paths (update these to the 8 CSVs)
+file_paths = [
+    r"/content/dolat_abad_057A_06259_142123_disp_raw.csv",
+    r"/content/marvdasht_028A_06017_131313_disp_raw.csv",
+    r"/content/bardsir_1_057A_06004_131313_disp_raw.csv",
+    r"/content/semnan_130A_05394_131213_disp_raw.csv",
+    r"/content/lake_urmia_174A_05216_131313_disp_raw.csv",
+    r"/content/neyshabour_086A_05410_131313_disp_raw.csv",
+    r"/content/western_tehran_plain_028A_05385_191813_disp_raw.csv",
+    r"/content/lenjanat_028A_05817_131313_disp_raw.csv"
+]
+
+# Labels for each subplot (optional, or use filenames)
+titles = [
+    "Dolat Abad", "Marvdasht", "Bardsir", "Semnan",
+    "Urmia", "Neyshabour", "Tehran", "Lenjan"
+]
+
+# Create figure with 2 columns and 4 rows
+fig, axes = plt.subplots(4, 2, figsize=(12, 16), constrained_layout=True)
+
+axes = axes.flatten()  # Make it 1D array for easy indexing
+
+# Fixed color range
+vmin, vmax = -370, 80
+
+# Loop through files and axes
+for i, (file, title) in enumerate(zip(file_paths, titles)):
+    try:
+        df = pd.read_csv(file, sep="\t|,", engine='python')
+
+        lat = df['latitude']
+        lon = df['longitude']
+        disp = df['displacement (mm)']
+
+        sc = axes[i].scatter(
+            lon, lat, c=disp, cmap='coolwarm',
+            s=25, marker='s', edgecolors='none',
+            vmin=vmin, vmax=vmax
+        )
+        axes[i].set_title(title, fontsize=11)
+        axes[i].set_xlabel('Longitude', fontsize=10)
+        axes[i].set_ylabel('Latitude', fontsize=10)
+        axes[i].grid(True, linestyle='--', linewidth=0.4, alpha=0.5)
+
+    except Exception as e:
+        print(f"Error reading or plotting {file}: {e}")
+        axes[i].set_visible(False)
+
+
+# Shared colorbar on the right, not overlapping
+cbar = fig.colorbar(sc, ax=axes, location='right', shrink=0.9, pad=0.02, aspect=30)
+cbar.set_label('Displacement (mm)', fontsize=12)
+
+
+# Save the figure
+plt.suptitle('Ground Displacement Maps', fontsize=16)
+plt.savefig('multi_displacement_maps.png', dpi=400)
+plt.show()

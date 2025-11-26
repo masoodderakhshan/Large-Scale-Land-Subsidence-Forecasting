@@ -1,0 +1,313 @@
+import numpy as np
+import pandas as pd
+import random
+import logging
+import warnings
+from pathlib import Path
+import gc
+import pickle
+from typing import Dict, List, Tuple, Optional, Any
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib import rcParams
+
+# ML Libraries
+from sklearn.linear_model import ElasticNet
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.multioutput import MultiOutputRegressor
+
+# --- Matplotlib and Logging Configuration ---
+plt.rcParams['font.family'] = 'DejaVu Serif'
+plt.rcParams['font.size'] = 14
+plt.rcParams['axes.labelsize'] = 16
+plt.rcParams['axes.titlesize'] = 18
+plt.rcParams['xtick.labelsize'] = 14
+plt.rcParams['ytick.labelsize'] = 14
+plt.rcParams['legend.fontsize'] = 14
+plt.rcParams['figure.titlesize'] = 20
+plt.rcParams['axes.grid'] = True
+plt.rcParams['grid.alpha'] = 0.3
+plt.rcParams['axes.facecolor'] = '#f9f9f9'
+plt.rcParams['figure.facecolor'] = 'white'
+
+COLORS = ['#0077B6', '#D9534F', '#5CB85C', '#F0AD4E', '#5BC0DE', '#428BCA']
+warnings.filterwarnings('ignore')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('subsidence_model_elasticnet_multistep_forecast.log', 'w', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class ElasticNetSubsidencePredictor:
+    """
+    A machine learning framework for multi-step subsidence forecasting using an ElasticNet model.
+    """
+
+    def __init__(self, train_data_path: str, val_data_path: str, test_data_path: str, random_state: int = 42):
+        self.train_data_path = train_data_path
+        self.val_data_path = val_data_path
+        self.test_data_path = test_data_path
+        self.random_state = random_state
+        self.future_steps = 3  # Forecast three steps forward
+
+        np.random.seed(random_state)
+        random.seed(random_state)
+        logger.info(f"Forecasting {self.future_steps} step(s) ahead.")
+
+        self.feature_names = [
+            'Root Moisture (inst)', 'Soil Moisture 0-10cm (inst)', 'Soil Moisture 10-40cm (inst)',
+            'Soil Moisture 40-100cm (inst)', 'Soil Moisture 100-200cm (inst)',
+            'Soil Temperature 0-10cm (inst)', 'Soil Temperature 10-40cm (inst)',
+            'Soil Temperature 40-100cm (inst)', 'Soil Temperature 100-200cm (inst)',
+            'Evaporation (tavg)', 'Rainfall (tavg)', 'Subsurface Runoff (acc)',
+            'Air Temperature (f inst)', 'Wind Speed (f inst)', 'Average Displacement (mm)',
+            'Bulk Density Mean (0-5cm)', 'Cation Exchange Capacity Mean (0-5cm)',
+            'Coarse Fragments Volumetric Mean (0-5cm)', 'Clay Content Mean (0-5cm)',
+            'pH in Water Mean (0-5cm)', 'Sand Content Mean (0-5cm)', 'Silt Content Mean (0-5cm)',
+            'Soil Organic Carbon Mean (0-5cm)', 'Bulk Density Mean (15-30cm)',
+            'Cation Exchange Capacity Mean (15-30cm)', 'Coarse Fragments Volumetric Mean (15-30cm)',
+            'Clay Content Mean (15-30cm)', 'pH in Water Mean (15-30cm)', 'Sand Content Mean (15-30cm)',
+            'Silt Content Mean (15-30cm)', 'Soil Organic Carbon Mean (15-30cm)',
+            'Bulk Density Mean (60-100cm)', 'Cation Exchange Capacity Mean (60-100cm)',
+            'Coarse Fragments Volumetric Mean (60-100cm)', 'Clay Content Mean (60-100cm)',
+            'pH in Water Mean (60-100cm)', 'Sand Content Mean (60-100cm)',
+            'Silt Content Mean (60-100cm)', 'Soil Organic Carbon Mean (60-100cm)',
+            'Bulk Density Mean (100-200cm)', 'Cation Exchange Capacity Mean (100-200cm)',
+            'Coarse Fragments Volumetric Mean (100-200cm)', 'Clay Content Mean (100-200cm)',
+            'pH in Water Mean (100-200cm)', 'Sand Content Mean (100-200cm)',
+            'Silt Content Mean (100-200cm)', 'Soil Organic Carbon Mean (100-200cm)'
+        ]
+        self.selected_feature_names = [
+            'Sand Content Mean (15-30cm)', 'Silt Content Mean (60-100cm)',
+            'Coarse Fragments Volumetric Mean (60-100cm)', 'Soil Organic Carbon Mean (15-30cm)',
+            'Average Displacement (mm)', 'Root Moisture (inst)', 'Soil Temperature 10-40cm (inst)',
+            'Evaporation (tavg)', 'Soil Moisture 0-10cm (inst)', 'Soil Moisture 10-40cm (inst)'
+        ]
+        self.target_name = 'Average Displacement (mm)'
+        self.target_index = self.feature_names.index(self.target_name)
+
+        self.train_data, self.val_data, self.test_data = None, None, None
+        self.model = None
+        self.scaler = None
+        self.model_results = {}
+        self.optimal_time_steps = 0
+        self.feature_indices = []
+        self.X_test_flat = None
+        self.flat_feature_names = None
+
+        # Hyperparameters for ElasticNet
+        self.best_params = {
+            'alpha': 0.1,         # Regularization strength
+            'l1_ratio': 0.5,      # The ElasticNet mixing parameter (0=L2, 1=L1)
+            'max_iter': 2000,     # Maximum number of iterations
+            'tol': 1e-4,          # Tolerance for stopping criteria
+            'random_state': self.random_state
+        }
+
+        self.output_dir = Path("elasticnet_multistep_forecast_outputs")
+        self.output_dir.mkdir(exist_ok=True)
+
+    def _load_data_from_path(self, path: str) -> np.ndarray:
+        """Loads numpy data from a given .npz file path."""
+        try:
+            logger.info(f"Loading data from: {path}")
+            data = np.load(path)['data']
+            logger.info(f"  - Data shape: {data.shape}")
+            return data
+        except Exception as e:
+            logger.error(f"Error loading data from {path}: {str(e)}")
+            raise
+
+    def load_datasets(self) -> None:
+        """Loads train, validation, and test datasets from specified paths."""
+        self.train_data = self._load_data_from_path(self.train_data_path)
+        self.val_data = self._load_data_from_path(self.val_data_path)
+        self.test_data = self._load_data_from_path(self.test_data_path)
+        self.feature_indices = [self.feature_names.index(name) for name in self.selected_feature_names]
+
+    def create_sequences(self, data: np.ndarray, past_months: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Creates input sequences and corresponding future targets from raw time-series data."""
+        sequences, targets = [], []
+        num_timesteps, num_grid_cells, _ = data.shape
+        for grid_idx in range(num_grid_cells):
+            for t in range(past_months, num_timesteps - self.future_steps + 1):
+                seq = data[t - past_months:t, grid_idx, self.feature_indices]
+                target = data[t:t + self.future_steps, grid_idx, self.target_index]
+                sequences.append(seq)
+                targets.append(target)
+        sequences, targets = np.array(sequences), np.array(targets)
+        # Remove any sequences or targets containing NaN values
+        valid_mask = ~(np.isnan(sequences).any(axis=(1, 2)) | np.isnan(targets).any(axis=1))
+        return sequences[valid_mask], targets[valid_mask]
+
+    def find_optimal_time_steps(self) -> int:
+        """
+        Determines the optimal number of past time steps to use as input by evaluating
+        model performance on the validation set.
+        """
+        logger.info("Finding optimal number of past time steps for input...")
+        results = []
+        for past_months in range(2, 13):
+            try:
+                X_train, y_train = self.create_sequences(self.train_data, past_months)
+                if len(X_train) < 100: continue
+                
+                # Reshape and scale data
+                scaler = StandardScaler()
+                X_train_flat = scaler.fit_transform(X_train.reshape(X_train.shape[0], -1))
+
+                # Use a simple ElasticNet for this search
+                model = MultiOutputRegressor(ElasticNet(random_state=self.random_state))
+                model.fit(X_train_flat, y_train)
+                
+                X_val, y_val = self.create_sequences(self.val_data, past_months)
+                if len(X_val) < 20: continue
+                X_val_flat = scaler.transform(X_val.reshape(X_val.shape[0], -1))
+
+                val_score = r2_score(y_val, model.predict(X_val_flat))
+                results.append({'past_months': past_months, 'val_r2': val_score})
+                logger.info(f"  - Time steps: {past_months}, Validation R² (avg): {val_score:.4f}")
+            except Exception as e:
+                logger.error(f"Error while testing {past_months} time steps: {str(e)}")
+                continue
+        
+        if not results:
+            raise ValueError("Could not find optimal time steps. Check data quality or sample sizes.")
+            
+        best_result = max(results, key=lambda x: x['val_r2'])
+        logger.info(f"Optimal time steps found: {best_result['past_months']} (R²: {best_result['val_r2']:.4f})")
+        return best_result['past_months']
+
+    def train_elasticnet_model(self) -> None:
+        """
+        Trains the final ElasticNet model using the optimal number of time steps and evaluates it.
+        """
+        self.optimal_time_steps = self.find_optimal_time_steps()
+        logger.info(f"\nTraining final ElasticNet with {self.optimal_time_steps} optimal time steps...")
+
+        self.flat_feature_names = [f'{f.split("(")[0].strip()} (t-{self.optimal_time_steps-t-1})' for t in range(self.optimal_time_steps) for f in self.selected_feature_names]
+        
+        X_train, y_train = self.create_sequences(self.train_data, self.optimal_time_steps)
+        X_val, y_val = self.create_sequences(self.val_data, self.optimal_time_steps)
+        X_test, y_test = self.create_sequences(self.test_data, self.optimal_time_steps)
+
+        # Initialize and apply the scaler
+        self.scaler = StandardScaler()
+        X_train_flat = self.scaler.fit_transform(X_train.reshape(X_train.shape[0], -1))
+        X_val_flat = self.scaler.transform(X_val.reshape(X_val.shape[0], -1))
+        self.X_test_flat = self.scaler.transform(X_test.reshape(X_test.shape[0], -1))
+        
+        # Define and train the model
+        base_estimator = ElasticNet(**self.best_params)
+        self.model = MultiOutputRegressor(base_estimator)
+
+        logger.info(f"Using hyperparameters: {self.best_params}")
+        logger.info("Training with MultiOutputRegressor.")
+        
+        self.model.fit(X_train_flat, y_train)
+        
+        y_train_pred = self.model.predict(X_train_flat)
+        y_val_pred = self.model.predict(X_val_flat)
+        y_test_pred = self.model.predict(self.X_test_flat)
+
+        # Store results
+        self.model_results = {
+            'train': {'r2': r2_score(y_train, y_train_pred), 'rmse': np.sqrt(mean_squared_error(y_train, y_train_pred)), 'mae': mean_absolute_error(y_train, y_train_pred)},
+            'val': {'r2': r2_score(y_val, y_val_pred), 'rmse': np.sqrt(mean_squared_error(y_val, y_val_pred)), 'mae': mean_absolute_error(y_val, y_val_pred)},
+            'test': {'r2': r2_score(y_test, y_test_pred), 'rmse': np.sqrt(mean_squared_error(y_test, y_test_pred)), 'mae': mean_absolute_error(y_test, y_test_pred)},
+            'predictions': {'y_test_pred': y_test_pred, 'y_test': y_test}
+        }
+        logger.info(f"ElasticNet - Train R² (avg): {self.model_results['train']['r2']:.4f}, Val R² (avg): {self.model_results['val']['r2']:.4f}, Test R² (avg): {self.model_results['test']['r2']:.4f}")
+    
+    def plot_coefficient_importance(self, top_n: int = 20) -> None:
+        """
+        Plots the feature coefficients from the trained ElasticNet model for each forecast step
+        to show feature importance.
+        """
+        logger.info("Calculating and plotting feature coefficient importance...")
+        if not hasattr(self.model, 'estimators_'):
+            logger.warning("Model has not been trained yet. Skipping coefficient plots.")
+            return
+
+        for i, estimator in enumerate(self.model.estimators_):
+            step = i + 1
+            # The coefficients from the linear model
+            coefficients = estimator.coef_
+            
+            # Create a pandas Series for easy sorting and plotting
+            coef_series = pd.Series(coefficients, index=self.flat_feature_names)
+            
+            # Get the top N features by the absolute value of their coefficients
+            top_coefs = coef_series.abs().nlargest(top_n).index
+            sorted_coefs = coef_series[top_coefs].sort_values()
+
+            # Plotting
+            plt.figure(figsize=(12, 10))
+            sorted_coefs.plot(kind='barh', color=COLORS[0])
+            plt.title(f'Feature Coefficient Importance for Forecast Step t+{step}', fontweight='bold')
+            plt.xlabel('Coefficient Value')
+            plt.tight_layout()
+            plt.savefig(self.output_dir / f'elasticnet_coefficient_importance_step_{step}.png', dpi=400, bbox_inches='tight')
+            plt.close()
+            
+        logger.info("  - Saved coefficient importance plots for all forecast steps.")
+
+    def plot_performance_summary(self) -> None:
+        """Generates and saves a bar chart summarizing the model's performance metrics."""
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+        metrics = ['r2', 'rmse', 'mae']
+        metric_names = ['R² Score (Avg)', 'RMSE (mm, Avg)', 'MAE (mm, Avg)']
+        
+        for idx, (metric, name) in enumerate(zip(metrics, metric_names)):
+            ax = axes[idx]
+            values = [self.model_results[split][metric] for split in ['train', 'val', 'test']]
+            bars = ax.bar(['Train', 'Validation', 'Test'], values, color=COLORS[:3], alpha=0.8)
+            ax.set_title(f'ElasticNet - {name}', fontsize=16, fontweight='bold')
+            ax.set_ylabel(name, fontsize=14)
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height, f'{height:.3f}', ha='center', va='bottom', fontsize=12)
+
+        plt.suptitle('ElasticNet Multi-Step Performance Summary', fontsize=20, fontweight='bold')
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(self.output_dir / 'elasticnet_multistep_performance_summary.png', dpi=400, bbox_inches='tight')
+        plt.close()
+        logger.info("  - Saved performance summary plot.")
+        
+    def run_complete_pipeline(self) -> None:
+        """Executes the entire forecasting pipeline from data loading to model evaluation."""
+        logger.info("Starting ElasticNet Multi-Step Subsidence Forecasting Pipeline...")
+        try:
+            self.load_datasets()
+            self.train_elasticnet_model()
+            logger.info("\nCreating and saving visualizations...")
+            self.plot_performance_summary()
+            self.plot_coefficient_importance()
+            logger.info("\nPipeline finished successfully!")
+        except Exception as e:
+            logger.error(f"The pipeline failed with an error: {str(e)}", exc_info=True)
+            raise
+
+# --- Main Execution Block ---
+if __name__ == "__main__":
+    # Define paths to your data files
+    # Ensure these paths are correct for your environment
+    TRAIN_DATA_PATH = "/content/URM_TEH_NEY_MARV_LENJ.npz"
+    VAL_DATA_PATH = "/content/BARD.npz"
+    TEST_DATA_PATH = "/content/SEMN_DOLAT.npz"
+    RANDOM_STATE = 42
+
+    # Create an instance of the predictor and run the pipeline
+    predictor = ElasticNetSubsidencePredictor(
+        train_data_path=TRAIN_DATA_PATH,
+        val_data_path=VAL_DATA_PATH,
+        test_data_path=TEST_DATA_PATH,
+        random_state=RANDOM_STATE
+    )
+    predictor.run_complete_pipeline()

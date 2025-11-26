@@ -1,0 +1,42 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib import rcParams
+
+# Set font globally
+rcParams['font.family'] = 'DejaVu Serif'
+
+# Load CSV
+file_path = r"/content/lake_urmia_174A_05216_131313_disp_raw.csv"
+df = pd.read_csv(file_path, sep="\t|,", engine='python')
+
+# Extract data
+lat = df['latitude']
+lon = df['longitude']
+disp = df['displacement (mm)']
+
+# Create plot
+plt.figure(figsize=(8, 6))
+
+# Scatter plot with fixed color scale
+sc = plt.scatter(
+    lon, lat, c=disp, cmap='coolwarm',
+    s=40, marker='s', edgecolors='none',
+    vmin=-370, vmax=80  # Fixed color scale
+)
+
+# Colorbar
+cbar = plt.colorbar(sc)
+cbar.set_label('Displacement (mm)', fontsize=16)
+
+# Axis labels and title
+plt.xlabel('Longitude', fontsize=16)
+plt.ylabel('Latitude', fontsize=16)
+plt.title('Ground Displacement Map', fontsize=14)
+
+# Grid and layout
+plt.grid(True, linestyle='--', linewidth=0.5, alpha=0.6)
+plt.tight_layout()
+
+# Save high-resolution figure
+plt.savefig('displacement_map_article_quality.png', dpi=400)
+plt.show()

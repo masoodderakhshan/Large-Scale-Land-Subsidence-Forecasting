@@ -1,0 +1,85 @@
+Variables inside the npz file:
+['data', 'coords']
+--------------------------------------------------     
+Array Name: data
+Data Type: float64
+Shape: (56, 84, 47)
+--------------------------------------------------     
+Explanation of dimensions:
+  - 56 time steps (bi-monthly, some missing)
+  - 84 matching grid cells
+  - 47 parameters (14 GLDAS + 1 Displacement + 32 Soil)
+--------------------------------------------------     
+ 1. RootMoist_inst
+ 2. SoilMoi0_10cm_inst
+ 3. SoilMoi10_40cm_inst
+ 4. SoilMoi40_100cm_inst
+ 5. SoilMoi100_200cm_inst
+ 6. SoilTMP0_10cm_inst
+ 7. SoilTMP10_40cm_inst
+ 8. SoilTMP40_100cm_inst
+ 9. SoilTMP100_200cm_inst
+10. Evap_tavg
+11. Rainf_tavg
+12. Qsb_acc
+13. Tair_f_inst
+14. Wind_f_inst
+15. avg_displacement_mm
+16. bdod_mean_05
+17. cec_mean_05
+18. cfvo_mean_05
+19. clay_mean_05
+20. phh2o_mean_05
+21. sand_mean_05
+22. silt_mean_05
+23. soc_mean_05
+24. bdod_mean_1530
+25. cec_mean_1530
+26. cfvo_mean_1530
+27. clay_mean_1530
+28. phh2o_mean_1530
+29. sand_mean_1530
+30. silt_mean_1530
+31. soc_mean_1530
+32. bdod_mean_60100
+33. cec_mean_60100
+34. cfvo_mean_60100
+35. clay_mean_60100
+36. phh2o_mean_60100
+37. sand_mean_60100
+38. silt_mean_60100
+39. soc_mean_60100
+40. bdod_mean_100200
+41. cec_mean_100200
+42. cfvo_mean_100200
+43. clay_mean_100200
+44. phh2o_mean_100200
+45. sand_mean_100200
+46. silt_mean_100200
+47. soc_mean_100200
+--------------------------------------------------
+Example slice (first time step, first location):
+[ 2.33730740e+02  3.22510830e+01  1.01625990e+02  1.97605160e+02
+  3.46342040e+02  2.76348540e+02  2.76919100e+02  2.78082180e+02
+  2.79869700e+02  1.05275440e-05  1.16061440e-05  1.65140260e-02
+  2.76852140e+02  2.83048320e+00 -1.19755320e+01  1.36121429e+02
+  2.26877381e+02  8.09166667e+01  2.96403571e+02  7.56595238e+01
+  2.47905952e+02  4.55264286e+02  2.25327381e+02  1.44414286e+02
+  2.19454762e+02  7.46511905e+01  3.25167857e+02  7.68690476e+01
+  2.32251190e+02  4.42123810e+02  1.21664286e+02  1.47004762e+02
+  2.12720238e+02  8.40690476e+01  3.46882143e+02  7.90940476e+01
+  2.23940476e+02  4.28744048e+02  8.30892857e+01  1.48294048e+02
+  2.07940476e+02  9.56142857e+01  3.31789286e+02  7.90619048e+01
+  2.44942857e+02  4.22815476e+02  7.13226190e+01]
+--------------------------------------------------
+Array Name: coords
+Data Type: float64
+Shape: (84, 2)
+Meaning: 84 grid points, each with (Lat_min, Lon_min)
+Example coordinates (first 5 locations):
+Location 1: Lat_min = 37.0, Lon_min = 45.75
+Location 2: Lat_min = 37.0, Lon_min = 46.0
+Location 3: Lat_min = 37.0, Lon_min = 46.25
+Location 4: Lat_min = 37.25, Lon_min = 45.0
+Location 5: Lat_min = 37.25, Lon_min = 46.0
+--------------------------------------------------

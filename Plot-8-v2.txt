@@ -1,0 +1,72 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib import rcParams, colors
+
+# --- 0. Global Settings ---
+rcParams['font.family'] = 'DejaVu Serif'
+rcParams['font.size'] = 10
+
+# --- 1. File Paths ---
+file_paths = [
+    r"/content/dolat_abad_057A_06259_142123_disp_raw.csv",
+    r"/content/marvdasht_028A_06017_131313_disp_raw.csv",
+    r"/content/bardsir_1_057A_06004_131313_disp_raw.csv",
+    r"/content/semnan_130A_05394_131213_disp_raw.csv",
+    r"/content/lake_urmia_174A_05216_131313_disp_raw.csv",
+    r"/content/neyshabour_086A_05410_131313_disp_raw.csv",
+    r"/content/western_tehran_plain_028A_05385_191813_disp_raw.csv",
+    r"/content/lenjanat_028A_05817_131313_disp_raw.csv"
+]
+
+titles = [
+    "Dolat Abad", "Marvdasht", "Bardsir", "Semnan",
+    "Urmia", "Neyshabour", "Tehran", "Lenjan"
+]
+
+# --- 2. Figure Layout ---
+fig, axes = plt.subplots(4, 2, figsize=(12, 16), constrained_layout=True)
+axes = axes.flatten()
+
+# --- 3. Colormap Settings ---
+vmin, vmax = -370, 80
+# Create a diverging colormap centered at zero
+cmap = plt.cm.coolwarm
+# Set NaN (missing values) to gray
+cmap.set_bad(color='gray')
+# Normalize around 0 (white)
+norm = colors.TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+
+# --- 4. Plot Loop ---
+for i, (file, title) in enumerate(zip(file_paths, titles)):
+    try:
+        df = pd.read_csv(file, sep="\t|,", engine='python')
+
+        lat = df['latitude']
+        lon = df['longitude']
+        disp = df['displacement (mm)']
+
+        # Replace infinite values if any
+        disp.replace([float('inf'), float('-inf')], pd.NA, inplace=True)
+
+        sc = axes[i].scatter(
+            lon, lat, c=disp, cmap=cmap, norm=norm,
+            s=25, marker='s', edgecolors='none'
+        )
+        axes[i].set_title(title, fontsize=11)
+        axes[i].set_xlabel('Longitude', fontsize=10)
+        axes[i].set_ylabel('Latitude', fontsize=10)
+        axes[i].grid(True, linestyle='--', linewidth=0.4, alpha=0.5)
+
+    except Exception as e:
+        print(f"Error reading or plotting {file}: {e}")
+        axes[i].set_visible(False)
+
+# --- 5. Shared Colorbar ---
+cbar = fig.colorbar(sc, ax=axes, location='right', shrink=0.9, pad=0.02, aspect=30)
+cbar.set_label('Displacement (mm)', fontsize=12)
+cbar.ax.tick_params(labelsize=9)
+
+# --- 6. Save & Show ---
+plt.suptitle('Ground Displacement Maps', fontsize=16)
+plt.savefig('multi_displacement_maps.png', dpi=400)
+plt.show()

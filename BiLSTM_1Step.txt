@@ -1,0 +1,485 @@
+import numpy as np
+import random
+import logging
+import warnings
+from pathlib import Path
+import gc
+import pickle
+from typing import Dict, List, Tuple, Optional, Any
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib import rcParams
+
+# ML Libraries
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import tensorflow as tf
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Bidirectional, LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.optimizers import Adam
+
+# --- Matplotlib and Logging Configuration ---
+# Set matplotlib font to a professional-looking serif font
+plt.rcParams['font.family'] = 'DejaVu Serif'
+plt.rcParams['font.size'] = 14
+plt.rcParams['axes.labelsize'] = 16
+plt.rcParams['axes.titlesize'] = 18
+plt.rcParams['xtick.labelsize'] = 14
+plt.rcParams['ytick.labelsize'] = 14
+plt.rcParams['legend.fontsize'] = 14
+plt.rcParams['figure.titlesize'] = 20
+plt.rcParams['axes.grid'] = True
+plt.rcParams['grid.alpha'] = 0.3
+plt.rcParams['axes.facecolor'] = '#f9f9f9'
+plt.rcParams['figure.facecolor'] = 'white'
+
+# Custom color palette for plots
+COLORS = ['#0077B6', '#D9534F', '#5CB85C', '#F0AD4E', '#5BC0DE', '#428BCA',
+          '#777777', '#F4A261', '#264653', '#E76F51']
+
+# Suppress warnings for a cleaner output
+warnings.filterwarnings('ignore')
+
+# Setup logging to file and console with UTF-8 encoding
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('subsidence_model_bilstm_forecast.log', 'w', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class BiLSTMSubsidencePredictor:
+    """
+    A machine learning framework for single-step subsidence forecasting using a BiLSTM model.
+    - Trains, validates, and tests on separate, pre-defined NPZ data files.
+    - Forecasts exactly one time step into the future.
+    - Automatically finds the optimal number of past time steps for model input.
+    - Generates professional visualizations for model performance.
+    """
+
+    def __init__(self, train_data_path: str, val_data_path: str, test_data_path: str, random_state: int = 42):
+        """
+        Initialize the subsidence predictor.
+
+        Args:
+            train_data_path: Path to the training NPZ data file.
+            val_data_path: Path to the validation NPZ data file.
+            test_data_path: Path to the testing NPZ data file.
+            random_state: Random state for reproducibility.
+        """
+        self.train_data_path = train_data_path
+        self.val_data_path = val_data_path
+        self.test_data_path = test_data_path
+        self.random_state = random_state
+        self.future_steps = 1  # Hardcoded to forecast one step forward
+
+        # Set random seeds for reproducibility
+        np.random.seed(random_state)
+        random.seed(random_state)
+        tf.random.set_seed(random_state)
+
+        logger.info(f"Forecasting {self.future_steps} step(s) ahead.")
+
+        # --- Feature Definitions ---
+        self.feature_names = [
+            'Root Moisture (inst)', 'Soil Moisture 0-10cm (inst)', 'Soil Moisture 10-40cm (inst)',
+            'Soil Moisture 40-100cm (inst)', 'Soil Moisture 100-200cm (inst)',
+            'Soil Temperature 0-10cm (inst)', 'Soil Temperature 10-40cm (inst)',
+            'Soil Temperature 40-100cm (inst)', 'Soil Temperature 100-200cm (inst)',
+            'Evaporation (tavg)', 'Rainfall (tavg)', 'Subsurface Runoff (acc)',
+            'Air Temperature (f inst)', 'Wind Speed (f inst)', 'Average Displacement (mm)',
+            'Bulk Density Mean (0-5cm)', 'Cation Exchange Capacity Mean (0-5cm)',
+            'Coarse Fragments Volumetric Mean (0-5cm)', 'Clay Content Mean (0-5cm)',
+            'pH in Water Mean (0-5cm)', 'Sand Content Mean (0-5cm)', 'Silt Content Mean (0-5cm)',
+            'Soil Organic Carbon Mean (0-5cm)', 'Bulk Density Mean (15-30cm)',
+            'Cation Exchange Capacity Mean (15-30cm)', 'Coarse Fragments Volumetric Mean (15-30cm)',
+            'Clay Content Mean (15-30cm)', 'pH in Water Mean (15-30cm)', 'Sand Content Mean (15-30cm)',
+            'Silt Content Mean (15-30cm)', 'Soil Organic Carbon Mean (15-30cm)',
+            'Bulk Density Mean (60-100cm)', 'Cation Exchange Capacity Mean (60-100cm)',
+            'Coarse Fragments Volumetric Mean (60-100cm)', 'Clay Content Mean (60-100cm)',
+            'pH in Water Mean (60-100cm)', 'Sand Content Mean (60-100cm)',
+            'Silt Content Mean (60-100cm)', 'Soil Organic Carbon Mean (60-100cm)',
+            'Bulk Density Mean (100-200cm)', 'Cation Exchange Capacity Mean (100-200cm)',
+            'Coarse Fragments Volumetric Mean (100-200cm)', 'Clay Content Mean (100-200cm)',
+            'pH in Water Mean (100-200cm)', 'Sand Content Mean (100-200cm)',
+            'Silt Content Mean (100-200cm)', 'Soil Organic Carbon Mean (100-200cm)'
+        ]
+        self.selected_feature_names = [
+            'Sand Content Mean (15-30cm)', 'Silt Content Mean (60-100cm)',
+            'Coarse Fragments Volumetric Mean (60-100cm)', 'Soil Organic Carbon Mean (15-30cm)',
+            'Average Displacement (mm)', 'Root Moisture (inst)', 'Soil Temperature 10-40cm (inst)',
+            'Evaporation (tavg)', 'Soil Moisture 0-10cm (inst)', 'Soil Moisture 10-40cm (inst)'
+        ]
+        self.target_name = 'Average Displacement (mm)'
+        self.target_index = self.feature_names.index(self.target_name)
+
+        # --- Model and Data Storage ---
+        self.train_data, self.val_data, self.test_data = None, None, None
+        self.model = None
+        self.scaler_x = None # Scaler for features
+        self.scaler_y = None # Scaler for target
+        self.model_results = {}
+        self.optimal_time_steps = 0
+        self.feature_indices = []
+        self.history = None
+
+        # Create output directory for saving results
+        self.output_dir = Path("bilstm_forecast_outputs")
+        self.output_dir.mkdir(exist_ok=True)
+
+    def _load_data_from_path(self, path: str) -> np.ndarray:
+        """Helper function to load data from a single NPZ file."""
+        try:
+            logger.info(f"Loading data from: {path}")
+            npz_file = np.load(path)
+            data = npz_file['data']
+            if len(data.shape) != 3:
+                raise ValueError(f"Expected 3D data in {path}, but got {len(data.shape)}D")
+            logger.info(f"  - Data shape: {data.shape}")
+            return data
+        except Exception as e:
+            logger.error(f"Error loading data from {path}: {str(e)}")
+            raise
+
+    def load_datasets(self) -> None:
+        """Load the training, validation, and test datasets from their respective files."""
+        self.train_data = self._load_data_from_path(self.train_data_path)
+        self.val_data = self._load_data_from_path(self.val_data_path)
+        self.test_data = self._load_data_from_path(self.test_data_path)
+
+        self.feature_indices = [self.feature_names.index(name) for name in self.selected_feature_names]
+        logger.info(f"Selected feature indices: {self.feature_indices}")
+
+    def create_sequences(self, data: np.ndarray, past_months: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Create input sequences and corresponding targets from a given dataset."""
+        sequences, targets = [], []
+        num_timesteps, num_grid_cells, _ = data.shape
+
+        for grid_idx in range(num_grid_cells):
+            for t in range(past_months, num_timesteps - self.future_steps + 1):
+                seq = data[t - past_months:t, grid_idx, self.feature_indices]
+                target = data[t:t + self.future_steps, grid_idx, self.target_index]
+                sequences.append(seq)
+                targets.append(target)
+
+        sequences, targets = np.array(sequences), np.array(targets)
+        valid_mask = ~(np.isnan(sequences).any(axis=(1, 2)) | np.isnan(targets).any(axis=1))
+        return sequences[valid_mask], targets[valid_mask]
+
+    def find_optimal_time_steps(self) -> int:
+        """Find the optimal number of past time steps by evaluating on the validation set."""
+        logger.info("Finding optimal number of past time steps for input...")
+        results = []
+        time_steps_range = range(2, 13)
+        
+        # Prepare scalers based on the full training data
+        self.scaler_x = StandardScaler()
+        self.scaler_y = StandardScaler()
+
+        # Reshape data to 2D for scaler fitting: (timesteps * grid_cells, features)
+        train_data_reshaped_x = self.train_data[:, :, self.feature_indices].reshape(-1, len(self.feature_indices))
+        train_data_reshaped_y = self.train_data[:, :, self.target_index].reshape(-1, 1)
+
+        # Fit scalers only on training data
+        self.scaler_x.fit(train_data_reshaped_x)
+        self.scaler_y.fit(train_data_reshaped_y)
+
+        for past_months in time_steps_range:
+            try:
+                X_train, y_train = self.create_sequences(self.train_data, past_months)
+                X_val, y_val = self.create_sequences(self.val_data, past_months)
+
+                if len(X_train) < 100 or len(X_val) < 20:
+                    logger.warning(f"Skipping {past_months} time steps due to insufficient samples.")
+                    continue
+                
+                # Scale the data
+                X_train_scaled = self.scaler_x.transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape)
+                X_val_scaled = self.scaler_x.transform(X_val.reshape(-1, X_val.shape[-1])).reshape(X_val.shape)
+                y_train_scaled = self.scaler_y.transform(y_train)
+                y_val_scaled = self.scaler_y.transform(y_val)
+
+                # Build a simple BiLSTM model for evaluation
+                model = Sequential([
+                    Bidirectional(LSTM(20, input_shape=(past_months, len(self.feature_indices)))),
+                    Dense(self.future_steps)
+                ])
+                model.compile(optimizer='adam', loss='mse')
+                
+                # Train the model
+                model.fit(X_train_scaled, y_train_scaled, epochs=20, batch_size=32, validation_data=(X_val_scaled, y_val_scaled), verbose=0,
+                          callbacks=[EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)])
+
+                # Evaluate using R2 score on original scale
+                y_val_pred_scaled = model.predict(X_val_scaled)
+                y_val_pred = self.scaler_y.inverse_transform(y_val_pred_scaled)
+                val_score = r2_score(y_val, y_val_pred)
+
+                results.append({'past_months': past_months, 'val_r2': val_score})
+                logger.info(f"  - Time steps: {past_months}, Validation R²: {val_score:.4f}")
+                
+                del model
+                gc.collect()
+                tf.keras.backend.clear_session()
+
+            except Exception as e:
+                logger.error(f"Error while testing {past_months} time steps: {str(e)}")
+                continue
+
+        if not results:
+            raise ValueError("Could not find a valid time step configuration. Check data quality and size.")
+
+        best_result = max(results, key=lambda x: x['val_r2'])
+        optimal_steps = best_result['past_months']
+        logger.info(f"Optimal time steps found: {optimal_steps} (Validation R²: {best_result['val_r2']:.4f})")
+        return optimal_steps
+
+    def train_bilstm_model(self) -> None:
+        """Train and evaluate the final BiLSTM model using optimal time steps."""
+        self.optimal_time_steps = self.find_optimal_time_steps()
+        logger.info(f"\nTraining final BiLSTM with {self.optimal_time_steps} optimal time steps...")
+
+        # Create sequences with optimal time steps
+        X_train, y_train = self.create_sequences(self.train_data, self.optimal_time_steps)
+        X_val, y_val = self.create_sequences(self.val_data, self.optimal_time_steps)
+        X_test, y_test = self.create_sequences(self.test_data, self.optimal_time_steps)
+
+        # Scale the data using the pre-fitted scalers
+        X_train_scaled = self.scaler_x.transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape)
+        X_val_scaled = self.scaler_x.transform(X_val.reshape(-1, X_val.shape[-1])).reshape(X_val.shape)
+        X_test_scaled = self.scaler_x.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
+        
+        y_train_scaled = self.scaler_y.transform(y_train)
+        y_val_scaled = self.scaler_y.transform(y_val)
+        y_test_scaled = self.scaler_y.transform(y_test)
+
+        # Define the final BiLSTM model architecture
+        self.model = Sequential([
+            Bidirectional(LSTM(64, return_sequences=True, input_shape=(self.optimal_time_steps, len(self.feature_indices)))),
+            Dropout(0.3),
+            Bidirectional(LSTM(32)),
+            Dropout(0.3),
+            Dense(16, activation='relu'),
+            Dense(self.future_steps)
+        ])
+        
+        self.model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error')
+        self.model.summary(print_fn=logger.info)
+
+        # Define callbacks
+        model_checkpoint_path = self.output_dir / 'best_bilstm_model.h5'
+        checkpoint = ModelCheckpoint(filepath=model_checkpoint_path, save_best_only=True, monitor='val_loss', mode='min', verbose=1)
+        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1)
+
+        # Train the model
+        logger.info("Training with BiLSTM model...")
+        self.history = self.model.fit(
+            X_train_scaled, y_train_scaled,
+            epochs=100,
+            batch_size=64,
+            validation_data=(X_val_scaled, y_val_scaled),
+            callbacks=[checkpoint, early_stopping],
+            verbose=1
+        )
+        
+        # Load the best model saved by ModelCheckpoint
+        self.model = load_model(model_checkpoint_path)
+
+        # Make predictions on scaled data
+        y_train_pred_scaled = self.model.predict(X_train_scaled)
+        y_val_pred_scaled = self.model.predict(X_val_scaled)
+        y_test_pred_scaled = self.model.predict(X_test_scaled)
+
+        # Inverse transform predictions to original scale
+        y_train_pred = self.scaler_y.inverse_transform(y_train_pred_scaled)
+        y_val_pred = self.scaler_y.inverse_transform(y_val_pred_scaled)
+        y_test_pred = self.scaler_y.inverse_transform(y_test_pred_scaled)
+
+        # Store results
+        self.model_results = {
+            'train': {'r2': r2_score(y_train, y_train_pred), 'rmse': np.sqrt(mean_squared_error(y_train, y_train_pred)), 'mae': mean_absolute_error(y_train, y_train_pred)},
+            'val': {'r2': r2_score(y_val, y_val_pred), 'rmse': np.sqrt(mean_squared_error(y_val, y_val_pred)), 'mae': mean_absolute_error(y_val, y_val_pred)},
+            'test': {'r2': r2_score(y_test, y_test_pred), 'rmse': np.sqrt(mean_squared_error(y_test, y_test_pred)), 'mae': mean_absolute_error(y_test, y_test_pred)},
+            'predictions': {'y_test_pred': y_test_pred.ravel(), 'y_test': y_test.ravel()}
+        }
+        logger.info(f"BiLSTM - Train R²: {self.model_results['train']['r2']:.4f}, Val R²: {self.model_results['val']['r2']:.4f}, Test R²: {self.model_results['test']['r2']:.4f}")
+
+    def plot_training_history(self) -> None:
+        """Plot the model's training and validation loss over epochs."""
+        if not self.history:
+            logger.warning("No training history found. Skipping plot.")
+            return
+
+        plt.figure(figsize=(12, 7))
+        plt.plot(self.history.history['loss'], label='Training Loss', color=COLORS[0], lw=2)
+        plt.plot(self.history.history['val_loss'], label='Validation Loss', color=COLORS[1], lw=2)
+        plt.title('Model Training History (Loss)', fontsize=16, fontweight='bold')
+        plt.xlabel('Epoch', fontsize=14)
+        plt.ylabel('Mean Squared Error (Scaled)', fontsize=14)
+        plt.legend()
+        plt.grid(True, alpha=0.4)
+        plt.savefig(self.output_dir / 'bilstm_training_history.png', dpi=400, bbox_inches='tight')
+        plt.close()
+        logger.info("  - Saved training history plot.")
+
+    def plot_performance_summary(self) -> None:
+        """Plot the performance metrics (R², RMSE, MAE) for all data splits."""
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+        metrics = ['r2', 'rmse', 'mae']
+        metric_names = ['R² Score', 'RMSE (mm)', 'MAE (mm)']
+        
+        for idx, (metric, name) in enumerate(zip(metrics, metric_names)):
+            ax = axes[idx]
+            values = [self.model_results[split][metric] for split in ['train', 'val', 'test']]
+            bars = ax.bar(['Train', 'Validation', 'Test'], values, color=COLORS[:3], alpha=0.8)
+            ax.set_title(f'BiLSTM - {name}', fontsize=16, fontweight='bold')
+            ax.set_ylabel(name, fontsize=14)
+            ax.grid(True, alpha=0.3, axis='y')
+
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height, f'{height:.3f}', ha='center', va='bottom', fontsize=12)
+
+        plt.suptitle('BiLSTM Performance Summary', fontsize=20, fontweight='bold')
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(self.output_dir / 'bilstm_performance_summary.png', dpi=400, bbox_inches='tight')
+        plt.close()
+        logger.info("  - Saved performance summary plot.")
+
+    def plot_actual_vs_predicted(self) -> None:
+        """Plot a scatter graph of actual vs. predicted values for the test set."""
+        y_test = self.model_results['predictions']['y_test']
+        y_test_pred = self.model_results['predictions']['y_test_pred']
+        r2, rmse, mae = self.model_results['test']['r2'], self.model_results['test']['rmse'], self.model_results['test']['mae']
+
+        plt.figure(figsize=(10, 8))
+        plt.scatter(y_test, y_test_pred, alpha=0.5, color=COLORS[0], edgecolors='k', s=50)
+        plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2.5, label='Ideal Fit')
+        plt.xlabel('Actual Displacement (mm)', fontsize=14)
+        plt.ylabel('Predicted Displacement (mm)', fontsize=14)
+        plt.title(f'Actual vs. Predicted Displacement (Test Set)\nR² = {r2:.4f}', fontsize=16, fontweight='bold')
+        textstr = f'RMSE: {rmse:.3f} mm\nMAE: {mae:.3f} mm'
+        plt.text(0.05, 0.95, textstr, transform=plt.gca().transAxes, fontsize=12, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.savefig(self.output_dir / 'bilstm_actual_vs_predicted.png', dpi=400, bbox_inches='tight')
+        plt.close()
+        logger.info("  - Saved actual vs. predicted plot.")
+
+    def plot_prediction_residuals(self) -> None:
+        """Plot the residuals of the predictions on the test set."""
+        residuals = self.model_results['predictions']['y_test'] - self.model_results['predictions']['y_test_pred']
+
+        plt.figure(figsize=(12, 7))
+        sns.histplot(residuals, kde=True, color=COLORS[4], bins=50)
+        plt.title('Distribution of Prediction Residuals (Test Set)', fontsize=16, fontweight='bold')
+        plt.xlabel('Residual (Actual - Predicted) (mm)', fontsize=14)
+        plt.ylabel('Frequency', fontsize=14)
+        plt.axvline(0, color='r', linestyle='--', lw=2)
+        plt.grid(True, alpha=0.3)
+        plt.savefig(self.output_dir / 'bilstm_prediction_residuals.png', dpi=400, bbox_inches='tight')
+        plt.close()
+        logger.info("  - Saved prediction residuals plot.")
+
+    def print_comprehensive_results(self) -> None:
+        """Print a formatted, comprehensive summary of the final results to the console."""
+        logger.info("\n" + "="*100)
+        logger.info("BILSTM SUBSIDENCE FORECASTING RESULTS")
+        logger.info("="*100)
+        logger.info(f"Training Data:   {self.train_data_path}")
+        logger.info(f"Validation Data: {self.val_data_path}")
+        logger.info(f"Test Data:       {self.test_data_path}")
+        logger.info(f"Time steps forecasted: {self.future_steps}")
+        logger.info(f"Optimal past time steps used for input: {self.optimal_time_steps}")
+        logger.info("="*100)
+
+        metrics = self.model_results
+        logger.info("\nMODEL PERFORMANCE SUMMARY:")
+        logger.info("-" * 50)
+        logger.info(f"{'Split':<12}{'R² Score':<12}{'RMSE (mm)':<12}{'MAE (mm)':<12}")
+        logger.info("-" * 50)
+        logger.info(f"{'Training':<12}{metrics['train']['r2']:<12.4f}{metrics['train']['rmse']:<12.4f}{metrics['train']['mae']:<12.4f}")
+        logger.info(f"{'Validation':<12}{metrics['val']['r2']:<12.4f}{metrics['val']['rmse']:<12.4f}{metrics['val']['mae']:<12.4f}")
+        logger.info(f"{'Test':<12}{metrics['test']['r2']:<12.4f}{metrics['test']['rmse']:<12.4f}{metrics['test']['mae']:<12.4f}")
+        logger.info("="*100)
+
+    def save_model_and_results(self) -> None:
+        """Save the trained model, scalers, and results to disk."""
+        # The best model is already saved via ModelCheckpoint. Here we save other artifacts.
+        scalers = {'scaler_x': self.scaler_x, 'scaler_y': self.scaler_y}
+        with open(self.output_dir / 'bilstm_scalers.pickle', 'wb') as f:
+            pickle.dump(scalers, f)
+            
+        results_to_save = {
+            'model_results': self.model_results,
+            'optimal_time_steps': self.optimal_time_steps,
+            'selected_features': self.selected_feature_names,
+            'future_steps_forecasted': self.future_steps,
+            'training_history': self.history.history if self.history else None
+        }
+        with open(self.output_dir / 'bilstm_results.pickle', 'wb') as f:
+            pickle.dump(results_to_save, f)
+            
+        logger.info(f"Model, scalers, and results dictionary saved to '{self.output_dir}/'")
+
+    def run_complete_pipeline(self) -> None:
+        """Execute the complete machine learning pipeline from data loading to saving results."""
+        logger.info("Starting BiLSTM Subsidence Forecasting Pipeline...")
+        try:
+            self.load_datasets()
+            self.train_bilstm_model()
+            
+            logger.info("\nCreating and saving visualizations...")
+            self.plot_training_history()
+            self.plot_performance_summary()
+            self.plot_actual_vs_predicted()
+            self.plot_prediction_residuals()
+
+            self.print_comprehensive_results()
+            self.save_model_and_results()
+
+            logger.info("\nPipeline completed successfully!")
+            logger.info(f"All outputs have been saved to: {self.output_dir.absolute()}")
+
+        except Exception as e:
+            logger.error(f"The pipeline failed with an error: {str(e)}", exc_info=True)
+            raise
+
+# --- Main Execution Block ---
+if __name__ == "__main__":
+    # Define paths to your data files.
+    # Ensure these files exist in your environment.
+    # Using placeholder paths for demonstration.
+    # Create dummy files if they don't exist to run the script.
+    
+    Path("./data").mkdir(exist_ok=True)
+    TRAIN_DATA_PATH = "/content/URM_TEH_NEY_MARV_LENJ.npz"
+    VAL_DATA_PATH = "/content/BARD.npz"
+    TEST_DATA_PATH = "/content/SEMN_DOLAT.npz"
+    
+    # Create dummy data files for demonstration purposes
+    if not Path(TRAIN_DATA_PATH).exists():
+        logger.info("Creating dummy training data...")
+        np.savez_compressed(TRAIN_DATA_PATH, data=np.random.rand(100, 5, 52) * 10)
+    if not Path(VAL_DATA_PATH).exists():
+        logger.info("Creating dummy validation data...")
+        np.savez_compressed(VAL_DATA_PATH, data=np.random.rand(50, 5, 52) * 10)
+    if not Path(TEST_DATA_PATH).exists():
+        logger.info("Creating dummy test data...")
+        np.savez_compressed(TEST_DATA_PATH, data=np.random.rand(50, 5, 52) * 10)
+
+    RANDOM_STATE = 42
+
+    # Instantiate the new predictor class
+    predictor = BiLSTMSubsidencePredictor(
+        train_data_path=TRAIN_DATA_PATH,
+        val_data_path=VAL_DATA_PATH,
+        test_data_path=TEST_DATA_PATH,
+        random_state=RANDOM_STATE
+    )
+    
+    predictor.run_complete_pipeline()
